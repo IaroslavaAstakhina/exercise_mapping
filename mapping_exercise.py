@@ -1,8 +1,10 @@
+
 #____________      TASK 1      ______________________
 import random
 from Bio import SeqIO
 from pathlib import Path
 import time
+
 def brute_force(text, p):
     positions = []
 
@@ -181,7 +183,103 @@ class FMIndex:
         return positions
 
 
+# ============================================================
+# TASK 4 - MAPPING READS
+# ============================================================
 
+def reverse_complement(seq):
+    complement = {
+        "A": "T",
+        "T": "A",
+        "C": "G",
+        "G": "C"
+    }
+
+    result = ""
+
+    for letter in reversed(seq):
+        result += complement[letter]
+
+    return result
+
+
+def hamming(a, b):
+    assert len(a) == len(b)
+
+    mismatches = 0
+
+    for x, y in zip(a, b):
+        if x != y:
+            mismatches += 1
+
+    return mismatches
+
+
+def seeds(read, n):
+    result = []
+
+    for i in range(n):
+        start = i * len(read) // n
+        end = (i + 1) * len(read) // n
+
+        result.append((start, read[start:end]))
+
+    return result
+
+
+def map_read(read, fm, ref, d=2, n_seeds=None):
+    if n_seeds is None:
+        n_seeds = d + 1
+
+    hits = []
+    total_candidates = 0
+
+    for strand, sequence in [
+        ("+", read),
+        ("-", reverse_complement(read))
+    ]:
+
+        candidates = set()
+
+        # Find candidates from exact seed matches
+        for offset, seed in seeds(sequence, n_seeds):
+
+            for p in fm.locate(seed):
+                start = p - offset
+
+                if 0 <= start <= len(ref) - len(sequence):
+                    candidates.add(start)
+
+        # Verify each unique candidate
+        total_candidates += len(candidates)
+
+        for start in candidates:
+            fragment = ref[start:start + len(sequence)]
+            mismatches = hamming(sequence, fragment)
+
+            if mismatches <= d:
+                hits.append((strand, start, mismatches))
+
+    return sorted(hits), total_candidates
+
+
+def brute_map(read, ref, d=2):
+    hits = []
+
+    for strand, sequence in [
+        ("+", read),
+        ("-", reverse_complement(read))
+    ]:
+
+        for start in range(len(ref) - len(sequence) + 1):
+            fragment = ref[start:start + len(sequence)]
+
+            mismatches = hamming(sequence, fragment)
+
+            if mismatches <= d:
+                hits.append((strand, start, mismatches))
+
+    return sorted(hits)
 
 
 # ============================================================
@@ -347,3 +445,196 @@ for test in range(300):
 
 print("random texts - done")
 
+
+# ============================================================
+# TASK 4 - FUNCTION TESTS
+# ============================================================
+
+print("\n________ TASK 4 - FUNCTION TESTS _______")
+
+assert reverse_complement("AACG") == "CGTT"
+assert reverse_complement(reverse_complement("AACG")) == "AACG"
+
+assert hamming("ACGT", "AGGA") == 2
+
+assert seeds("ACGTACGTAC", 3) == [
+    (0, "ACG"),
+    (3, "TAC"),
+    (6, "GTAC")
+]
+
+test_ref = "AAGGCGGCTTCA"
+test_fm = FMIndex(test_ref + "$", 4)
+
+hits, candidates = map_read("GGC", test_fm, test_ref, d=0)
+
+assert hits == brute_map("GGC", test_ref, d=0)
+assert ("+", 2, 0) in hits
+assert ("+", 5, 0) in hits
+
+print("Reverse complement - OK")
+print("Hamming - OK")
+print("Seeds - OK")
+print("Mapping - OK")
+
+
+# ============================================================
+# TASK 4 - MAP ALL READS
+# ============================================================
+
+folder = Path(__file__).resolve().parent
+
+reference_record = SeqIO.read(folder / "reference.fasta", "fasta")
+ref = str(reference_record.seq).upper()
+
+read_records = list(SeqIO.parse(folder / "reads.fasta", "fasta"))
+
+print("\n________ TASK 4 - MAPPING READS _______")
+print("Reference length:", len(ref))
+print("Number of reads:", len(read_records))
+
+# Build the FMIndex only once
+fm = FMIndex(ref + "$", 32)
+
+results = []
+total_candidates = 0
+
+start_time = time.perf_counter()
+
+for record in read_records:
+    read = str(record.seq).upper()
+
+    hits, candidates = map_read(read, fm, ref, d=2)
+
+    results.append((record.id, read, hits))
+    total_candidates += candidates
+
+elapsed = time.perf_counter() - start_time
+
+mapped = sum(1 for name, read, hits in results if hits)
+unmapped = sum(1 for name, read, hits in results if not hits)
+multiple = sum(1 for name, read, hits in results if len(hits) > 1)
+
+print("\nMapping results:")
+print("Mapped reads:", mapped)
+print("Unmapped reads:", unmapped)
+print("Reads with multiple hits:", multiple)
+print("Total candidates:", total_candidates)
+print("Average candidates per read:", total_candidates / len(results))
+print("Mapping time:", round(elapsed, 3), "seconds")
+
+print("\nFirst five reads:")
+
+for name, read, hits in results[:5]:
+    print("\nRead:", name)
+
+    if hits:
+        for strand, position, mismatches in hits:
+            print("Strand:", strand,
+                  "Position:", position,
+                  "Mismatches:", mismatches)
+    else:
+        print("Unmapped")
+
+
+# ============================================================
+# TASK 4 - SELF-CHECKS
+# ============================================================
+
+print("\n________ TASK 4 - SELF-CHECKS _______")
+
+# 1. Verify every reported hit
+for name, read, hits in results:
+
+    for strand, position, mismatches in hits:
+        assert 0 <= position <= len(ref) - len(read)
+
+        if strand == "+":
+            sequence = read
+        else:
+            sequence = reverse_complement(read)
+
+        fragment = ref[position:position + len(read)]
+
+        assert hamming(sequence, fragment) == mismatches
+        assert mismatches <= 2
+
+print("All reported hits verified - OK")
+
+
+# 2. Compare 30 random reads with brute force
+sample = random.sample(results, min(30, len(results)))
+
+for name, read, hits in sample:
+    expected = brute_map(read, ref, d=2)
+    assert hits == expected
+
+print("30 random reads vs brute force - OK")
+
+
+# 3. Check every unmapped read with brute force
+for name, read, hits in results:
+    if not hits:
+        assert brute_map(read, ref, d=2) == []
+
+print("All unmapped reads verified - OK")
+
+
+# 4. Check the reference ends
+first_read = ref[:100]
+last_read_rc = reverse_complement(ref[-100:])
+
+first_hits, _ = map_read(first_read, fm, ref)
+last_hits, _ = map_read(last_read_rc, fm, ref)
+
+assert ("+", 0, 0) in first_hits
+assert ("-", len(ref) - 100, 0) in last_hits
+
+print("Reference ends - OK")
+print("All Task 4 self-checks passed!")
+
+
+# ============================================================
+# TASK 4 - THINK ABOUT IT: SEED EXPERIMENT
+# ============================================================
+
+print("\n________ TASK 4 - SEED EXPERIMENT _______")
+
+for n_seeds in [3, 10, 12, 16]:
+
+    experiment_candidates = 0
+    all_hits = []
+
+    start_time = time.perf_counter()
+
+    for record in read_records:
+        read = str(record.seq).upper()
+
+        hits, candidates = map_read(
+            read, fm, ref, d=2, n_seeds=n_seeds
+        )
+
+        all_hits.append(hits)
+        experiment_candidates += candidates
+
+    elapsed = time.perf_counter() - start_time
+
+    same_hits = all(
+        all_hits[i] == results[i][2]
+        for i in range(len(results))
+    )
+
+    seed_lengths = sorted(set(
+        len(seed) for offset, seed in seeds("A" * 100, n_seeds)
+    ))
+
+    print("\nNumber of seeds:", n_seeds)
+    print("Seed lengths:", seed_lengths)
+    print("Average candidates:",
+          round(experiment_candidates / len(read_records), 2))
+    print("Time:", round(elapsed, 3), "seconds")
+    print("Same hits:", same_hits)
+
+    assert same_hits
+
+print("\nSeed experiment completed!")
